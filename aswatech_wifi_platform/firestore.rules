@@ -1,0 +1,304 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =====================================================
+    // 1. AUTHENTICATION HELPERS
+    // =====================================================
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function verifiedEmail() {
+      return signedIn()
+        && request.auth.token.email_verified == true;
+    }
+
+    function isSelf(uid) {
+      return signedIn()
+        && request.auth.uid == uid;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function userExists(uid) {
+      return exists(userPath(uid));
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && userExists(request.auth.uid)
+        && get(userPath(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isVerifiedSeller() {
+      return verifiedEmail()
+        && userExists(request.auth.uid)
+        && get(userPath(request.auth.uid)).data.role == 'seller';
+    }
+
+    function activeSeller() {
+      return isVerifiedSeller()
+        && get(userPath(request.auth.uid)).data.subscriptionStatus == 'active';
+    }
+
+    // =====================================================
+    // 2. VALIDATION HELPERS
+    // =====================================================
+
+    function validString(value, maxLength) {
+      return value is string
+        && value.size() > 0
+        && value.size() <= maxLength;
+    }
+
+    function validOptionalString(value, maxLength) {
+      return value is string
+        && value.size() <= maxLength;
+    }
+
+    // =====================================================
+    // 3. SELLER PROFILES
+    // Collection: users
+    // =====================================================
+
+    match /users/{uid} {
+
+      // A user can read their own profile.
+      // Administrators can read all profiles.
+      allow get, list: if isSelf(uid) || isAdmin();
+
+      // New accounts can create seller profiles only.
+      // Email must already be verified.
+      allow create: if isSelf(uid)
+        && verifiedEmail()
+
+        && request.resource.data.keys().hasAll([
+          'uid',
+          'businessName',
+          'email',
+          'phone',
+          'role',
+          'planId',
+          'subscriptionStatus',
+          'subscriptionExpiresAt',
+          'createdAt'
+        ])
+
+        && request.resource.data.keys().hasOnly([
+          'uid',
+          'businessName',
+          'email',
+          'phone',
+          'role',
+          'planId',
+          'subscriptionStatus',
+          'subscriptionExpiresAt',
+          'createdAt'
+        ])
+
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'seller'
+        && request.resource.data.planId == 'starter'
+        && request.resource.data.subscriptionStatus == 'pending'
+        && request.resource.data.subscriptionExpiresAt == null
+
+        && validString(request.resource.data.businessName, 100)
+        && request.resource.data.email is string
+        && request.resource.data.email.size() <= 254
+        && validString(request.resource.data.phone, 20)
+
+        && request.resource.data.createdAt == request.time;
+
+      // Only administrators can update seller profiles.
+      // Sellers cannot promote themselves or change subscriptions.
+      allow update: if isAdmin();
+
+      // Only administrators can delete profiles.
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================
+    // 4. ROUTER VALIDATION
+    // Collection: routers
+    // =====================================================
+
+    function validRouter(data) {
+
+      return data.keys().hasAll([
+          'ownerId',
+          'name',
+          'brand',
+          'location',
+          'notes',
+          'createdAt'
+        ])
+
+        && data.keys().hasOnly([
+          'ownerId',
+          'name',
+          'brand',
+          'location',
+          'notes',
+          'createdAt'
+        ])
+
+        && validString(data.ownerId, 128)
+        && validString(data.name, 100)
+        && validString(data.brand, 50)
+        && validOptionalString(data.location, 150)
+        && validOptionalString(data.notes, 1000)
+        && data.createdAt is timestamp;
+    }
+
+    // =====================================================
+    // 5. ROUTER RECORDS
+    // Collection: routers
+    // =====================================================
+
+    match /routers/{routerId} {
+
+      // Only verified, active sellers can add routers.
+      allow create: if activeSeller()
+
+        && request.resource.data.ownerId == request.auth.uid
+
+        && validRouter(request.resource.data)
+
+        && request.resource.data.createdAt == request.time;
+
+      // Sellers can read only their own router records.
+      // Administrators can read all router records.
+      allow get, list: if isAdmin()
+
+        || (verifiedEmail()
+          && resource.data.ownerId == request.auth.uid);
+
+      // Sellers can update their own routers only.
+      // Ownership and creation date cannot be changed.
+      allow update: if isAdmin()
+
+        || (activeSeller()
+          && resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && validRouter(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt);
+
+      // Sellers can delete only their own router records.
+      allow delete: if isAdmin()
+
+        || (activeSeller()
+          && resource.data.ownerId == request.auth.uid);
+    }
+
+    // =====================================================
+    // 6. WIFI PACKAGE VALIDATION
+    // Collection: wifiPackages
+    // =====================================================
+
+    function validPackage(data) {
+
+      return data.keys().hasAll([
+          'ownerId',
+          'name',
+          'priceKes',
+          'durationHours',
+          'dataAllowance',
+          'createdAt'
+        ])
+
+        && data.keys().hasOnly([
+          'ownerId',
+          'name',
+          'priceKes',
+          'durationHours',
+          'dataAllowance',
+          'createdAt'
+        ])
+
+        && validString(data.ownerId, 128)
+        && validString(data.name, 100)
+
+        && data.priceKes is number
+        && data.priceKes > 0
+        && data.priceKes <= 1000000
+
+        && data.durationHours is number
+        && data.durationHours > 0
+        && data.durationHours <= 8760
+
+        && validOptionalString(data.dataAllowance, 100)
+
+        && data.createdAt is timestamp;
+    }
+
+    // =====================================================
+    // 7. WIFI PACKAGES
+    // Collection: wifiPackages
+    // =====================================================
+
+    match /wifiPackages/{packageId} {
+
+      // Only verified, active sellers can create packages.
+      allow create: if activeSeller()
+
+        && request.resource.data.ownerId == request.auth.uid
+
+        && validPackage(request.resource.data)
+
+        && request.resource.data.createdAt == request.time;
+
+      // Sellers can read only their own packages.
+      allow get, list: if isAdmin()
+
+        || (verifiedEmail()
+          && resource.data.ownerId == request.auth.uid);
+
+      // Sellers can edit only their own packages.
+      allow update: if isAdmin()
+
+        || (activeSeller()
+          && resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && validPackage(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt);
+
+      // Sellers can delete only their own packages.
+      allow delete: if isAdmin()
+
+        || (activeSeller()
+          && resource.data.ownerId == request.auth.uid);
+    }
+
+    // =====================================================
+    // 8. PAYMENT RECORDS
+    // Collection: payments
+    // =====================================================
+
+    match /payments/{paymentId} {
+
+      // Sellers can read their own payment records.
+      // Admins can read all payments.
+      allow get, list: if isAdmin()
+
+        || (verifiedEmail()
+          && resource.data.ownerId == request.auth.uid);
+
+      // Payment creation and modification must happen
+      // through a trusted backend after payment verification.
+      allow create, update, delete: if false;
+    }
+
+    // =====================================================
+    // 9. DEFAULT DENY
+    // =====================================================
+
+    // No other collections are accessible unless
+    // explicit security rules are added.
+  }
+}
